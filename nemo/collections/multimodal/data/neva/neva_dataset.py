@@ -20,7 +20,6 @@ import tarfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence, Tuple, Union
 
-import decord
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -145,6 +144,7 @@ class TarOrFolderVideoLoader:
                     cap = decord.VideoReader(f)
                     return self.flatten_frames(cap)
         else:
+            import decord
             cap = decord.VideoReader(os.path.join(self.video_folder, file_name))
             return self.flatten_frames(cap)
         return None
@@ -938,8 +938,8 @@ class LazySupervisedDataset(Dataset):
             if images:
                 media_tensors = torch.stack(images)
                 if isinstance(self.processor, TiledSiglipImageProcessor):
-                    cur_token_len = ((media_tensors[0].shape[1] // self.processor.grid_height) // 14) * (
-                    (media_tensors[0].shape[2] // self.processor.grid_width) // 14
+                    cur_token_len = ((media_tensors[0].shape[1] // self.processor.downsample_height) // 14) * (
+                    (media_tensors[0].shape[2] // self.processor.downsample_width) // 14
                 )  # FIXME: 14 is hardcoded patch size
                 else: 
                     cur_token_len = (media_tensors[0].shape[1] // 14) * (
