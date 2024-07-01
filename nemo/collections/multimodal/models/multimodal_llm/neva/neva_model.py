@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
+import os, random
 from functools import partial
 from itertools import chain
 from typing import Any, Dict, Optional, Tuple, Union
@@ -127,12 +127,14 @@ class FrozenCLIPVisionTransformer(CLIPVisionTransformer):
 
 
 class TiledSiglipVisionModel(nn.Module):
-    def __init__(self, vision_model: SiglipVisionModel, grid_height: int, grid_width: int, vision_select_layer: int):
+    def __init__(self, vision_model: SiglipVisionModel, grid_height: int, grid_width: int, downsample_height: int, downsample_width: int, vision_select_layer: int):
         super().__init__()
         self.vision_model = vision_model
         self.dtype = self.vision_model.dtype
         self.grid_h = grid_height
         self.grid_w = grid_width
+        self.downsample_h = downsample_height
+        self.downsample_w = downsample_width
         self.return_select_layer = vision_select_layer
 
     def forward(
@@ -181,10 +183,9 @@ class TiledSiglipVisionModel(nn.Module):
             # Arrange as a continuous H x W
             features = rearrange(features, "b gh gw vh vw d -> b (gh vh) (gw vw) d")
 
-            # Downsample concatenating every grid_h x grid_w features
-            downsample_h, downsample_w = self.grid_h, self.grid_w
+            # Downsample concatenating every downsample_h x downsample_w features
             features = rearrange(features, "b (hd dh) (wd dw) d -> b (hd wd) (dh dw d)",
-                                b=b, dh=downsample_h, dw=downsample_w)
+                                b=b, dh=self.downsample_h, dw=self.downsample_w)
             return features
 
 
@@ -272,11 +273,15 @@ class TiledSiglipImageProcessor:
         processor: SiglipImageProcessor,
         grid_width: int = 1,
         grid_height: int = 1,
+        downsample_height: int = 1, 
+        downsample_width: int = 1,
         max_upscale: float = 2.0,
     ) -> None:
         self.processor = processor
         self.grid_width = grid_width
         self.grid_height = grid_height
+        self.downsample_height = downsample_height
+        self.downsample_width = downsample_width
         self.max_upscale = max_upscale
 
 
@@ -299,6 +304,7 @@ class TiledSiglipImageProcessor:
           grid_w, grid_h = self.grid_width,self.grid_height   # number of tiles in the grid
           tile_w, tile_h = self.processor.size['width'], self.processor.size['height']
           scale, origin = calculate_tile_placement(image.size, (tile_w, tile_h), (grid_w, grid_h), self.max_upscale)
+          scale = scale * random.uniform(0.85, 1.15)
           tile_coordinates = generate_tile_coordinates(origin, (tile_w, tile_h), (grid_w, grid_h), scale)
           images = [image.crop(cs) for cs in tile_coordinates]  # square, but needs resize
           images = self.processor.preprocess(images, return_tensors='pt')['pixel_values']
@@ -518,6 +524,8 @@ class NevaBaseModel:
                 vision_encoder = TiledSiglipVisionModel(vision_encoder,                                                         
                                                         grid_height = mm_cfg.vision_encoder.get("grid_height", 1),
                                                         grid_width = mm_cfg.vision_encoder.get("grid_width", 1),
+                                                        downsample_height = mm_cfg.vision_encoder.get("downsample_height", 1),
+                                                        downsample_width = mm_cfg.vision_encoder.get("downsample_width", 1),
                                                         vision_select_layer=mm_cfg.vision_encoder.get("vision_select_layer", -1),
                                                         ).cuda()
 
@@ -528,6 +536,8 @@ class NevaBaseModel:
                 image_processor = TiledSiglipImageProcessor(image_processor,
                                                             grid_width = mm_cfg.vision_encoder.get("grid_width", 1),
                                                             grid_height = mm_cfg.vision_encoder.get("grid_height", 1),
+                                                            downsample_height = mm_cfg.vision_encoder.get("downsample_height", 1),
+                                                            downsample_width = mm_cfg.vision_encoder.get("downsample_width", 1),
                                                             max_upscale = mm_cfg.vision_encoder.get("max_upscale", 2.0),
                                                             )
             else:
