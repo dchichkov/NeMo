@@ -751,6 +751,7 @@ class MegatronNevaModel(MultimodalAdapterModelMixin, MegatronGPTModel):
             in_features=self.cfg.mm_cfg.vision_encoder.hidden_size,
             out_features=self.cfg.hidden_size,
             bias=True,  # self.cfg.get("bias", False),
+            #group_size=self.cfg.mm_cfg.vision_encoder.hidden_size // (self.cfg.mm_cfg.vision_encoder.downsample_height * self.cfg.mm_cfg.vision_encoder.downsample_width)
         )
         for name, module in self.named_modules():
             self._check_and_add_adapter(

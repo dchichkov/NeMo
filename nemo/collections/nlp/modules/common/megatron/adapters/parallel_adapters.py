@@ -895,17 +895,37 @@ class MultimodalProjectorAdapter(nn.Module, AdapterModuleUtil):
         super().__init__()
 
         if adapter_type == 'linear':
-            self.mm_projector = torch.nn.Linear(in_features, out_features, bias)
+            groups = 3
+            if groups != 1:
+                # Apply a linear layer to each group of group_size (for each token).
+                self.mm_projector = nn.Sequential(
+                    nn.Unflatten(-1, (groups, in_features // groups)),
+                    nn.Linear(in_features // groups, out_features // groups, bias),
+                    nn.Flatten(start_dim=-2, end_dim=-1)
+                )
+            else:
+                self.mm_projector = torch.nn.Linear(in_features, out_features, bias)
         elif adapter_type == 'identity':
             self.mm_projector = lambda x: x
         else:
             mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', adapter_type)
             if mlp_gelu_match:
                 mlp_depth = int(mlp_gelu_match.group(1))
-                modules = [torch.nn.Linear(in_features, out_features, bias)]
+                groups = 3
+                hidden_size = 768
+
+                modules = [nn.Unflatten(-1, (groups, in_features // groups)),
+                        nn.Linear(in_features // groups, hidden_size, bias),
+                        nn.GELU()
+                        ]
                 for _ in range(1, mlp_depth):
-                    modules.append(torch.nn.GELU())
-                    modules.append(torch.nn.Linear(out_features, out_features, bias))
+                    modules.append(nn.Linear(hidden_size, hidden_size, bias))
+                    modules.append(nn.GELU())
+
+                modules += [nn.Flatten(start_dim=-2, end_dim=-1),
+                            nn.Linear(hidden_size * groups, out_features, bias),
+                            nn.GELU(),
+                ]
                 self.mm_projector = torch.nn.Sequential(*modules)
             else:
                 raise ValueError(f'Unknown mm_mlp_adapter_type type: {adapter_type}')
