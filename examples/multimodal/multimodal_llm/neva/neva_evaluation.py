@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time, logging
 import json
 import os
 import torch
@@ -52,7 +53,26 @@ class RequestDataSet(Dataset):
 
 @hydra_runner(config_path="conf", config_name="neva_inference")
 def main(cfg) -> None:
+    with open(cfg.prompt_file, 'r') as f:
+        lines = f.readlines()
+
+    with open(cfg.output_file, 'r+') as f:
+        answered_question_ids = set([json.loads(line)['question_id'] for line in f.readlines()])
+
+    if len(lines) == len(answered_question_ids):
+        logging.info(f"Exiting... answers and questions lengths ({len(lines)}) are same. Task had been completed already.")
+        return
+
+
     model, image_processor, video_processor = create_neva_model_and_processor(cfg)
+
+    try:
+        model.freeze()
+    except AttributeError:
+        logging.error("Failed to freeze the model.")
+        pass
+
+
 
     length_params: LengthParam = {
         "max_length": cfg.inference.tokens_to_generate,
@@ -71,9 +91,6 @@ def main(cfg) -> None:
         "end_strings": cfg.inference.end_strings,
     }
 
-    with open(cfg.prompt_file, 'r') as f:
-        lines = f.readlines()
-
     media_type_token = cfg.inference.get("media_type", "image")
     media_token = f"<{media_type_token}>"
 
@@ -81,6 +98,9 @@ def main(cfg) -> None:
     final_prompts = []
     for line in lines:
         prompt_dict = json.loads(line)
+        if prompt_dict['question_id'] in answered_question_ids:
+            continue
+
         assert 'prompt' in prompt_dict or 'text' in prompt_dict
         if 'prompt' not in prompt_dict:
             prompt_dict['prompt'] = prompt_dict['text']
@@ -96,63 +116,44 @@ def main(cfg) -> None:
             prompt_dict['video'] = video_processor(os.path.join(cfg.inference.media_base_path, prompt_dict['video']))
         final_prompts.append(prompt_dict)
 
-    responses = model.generate(
-        input_prompts=final_prompts, length_params=length_params, sampling_params=sampling_params, inference_config=cfg
-    )
-
-    # =================== Start Quantization ====================
-    if HAVE_MODELOPT and cfg.quantization.enable == True:
-        print(f"Using quantization algorithm: {cfg.quantization.algorithm}")
-        if cfg.quantization.algorithm == "int8_sq":
-            mtq_config = mtq.INT8_SMOOTHQUANT_CFG
-        elif cfg.quantization.algorithm == "fp8":
-            mtq_config = mtq.FP8_DEFAULT_CFG
-        elif cfg.quantization.algorithm == "awq":
-            mtq_config = mtq.INT4_AWQ_CFG
-        else:
-            raise ValueError(f"Unsupported quantization algorithm: {cfg.quantization.algorithm}")
-
-        def forward_loop():
-            model.generate(
-                input_prompts=final_prompts,
-                length_params=length_params,
-                sampling_params=sampling_params,
-                inference_config=cfg,
-            )
-
-        mtq.quantize(model, mtq_config, forward_loop)
-
-        responses = model.generate(
-            input_prompts=final_prompts,
-            length_params=length_params,
-            sampling_params=sampling_params,
-            inference_config=cfg,
-        )
-    # ============== Quantization End =========================
-
-    # PP middle stages do not yield any responses
-    if responses is None:
+    if not final_prompts:
+        logging.info(f"Exiting..., {len(final_prompts)} remaining out of {len(lines)}")
         return
 
-    if is_global_rank_zero():
-        results = []
-        for response, prompt in zip(responses, final_prompts):
-            prompt['full_text'] = response["clean_text"]
-            prompt['text'] = response["clean_response"]
-            prompt['model_id'] = cfg.neva_model_file
-            if 'image_path' in prompt:
-                prompt['image'] = prompt.pop('image_path')
-            if 'video_path' in prompt:
-                prompt['video'] = prompt.pop('video_path')
-            if 'answer_id' not in prompt:
-                prompt['answer_id'] = 0
-            if 'metadata' not in prompt:
-                prompt['metadata'] = {}
-            results.append(prompt)
 
-        with open(cfg.output_file, 'w') as f:
-            for result in results:
-                f.write(json.dumps(result) + '\n')
+    logging.info(f"Generating model responses..., {len(final_prompts)} remaining out of {len(lines)}")
+
+    BATCH = 256
+    for N in range(0, len(final_prompts), 256):
+        final_prompts_batch = final_prompts[N:N+256]
+        responses = model.generate(
+            input_prompts=final_prompts_batch, length_params=length_params, sampling_params=sampling_params, inference_config=cfg
+        )
+        logging.info(f"Generating model responses, {N} out of {len(final_prompts)}.")
+
+        # PP middle stages do not yield any responses
+        if responses is None:
+            return
+
+        if is_global_rank_zero():
+            results = []
+            for response, prompt in zip(responses, final_prompts_batch):
+                prompt['full_text'] = response["clean_text"]
+                prompt['text'] = response["clean_response"]
+                prompt['model_id'] = cfg.neva_model_file
+                if 'image_path' in prompt:
+                    prompt['image'] = prompt.pop('image_path')
+                if 'video_path' in prompt:
+                    prompt['video'] = prompt.pop('video_path')
+                if 'answer_id' not in prompt:
+                    prompt['answer_id'] = 0
+                if 'metadata' not in prompt:
+                    prompt['metadata'] = {}
+                results.append(prompt)
+
+            with open(cfg.output_file, 'a+') as f:
+                for result in results:
+                    f.write(json.dumps(result) + '\n')
 
 
 if __name__ == '__main__':
