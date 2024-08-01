@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse, base64, io, os
+import argparse, base64, io, os, sys, torch
 import asyncio, json, time, logging
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
+from typing import Optional, List, Dict, Any, Union
+from pydantic import BaseModel, HttpUrl, ValidationError, field_validator
 from fastapi import FastAPI
+import requests
+
+
 
 import gradio as gr
 import PIL.Image
@@ -24,12 +27,11 @@ from omegaconf import OmegaConf
 
 from nemo.collections.nlp.modules.common.transformer.text_generation import LengthParam, SamplingParam
 from nemo.collections.multimodal.parts.utils import create_neva_model_and_processor
-from nemo.collections.nlp.modules.common.transformer.text_generation import LengthParam, SamplingParam
 
 CFG_STRING = """
 trainer:
-  devices: 1
-  num_nodes: 1
+  devices: 8
+  num_nodes: 2
   accelerator: gpu
   logger: False # logger provided by exp_manager
   precision: bf16 # 16, 32, or bf16
@@ -63,7 +65,7 @@ hparams_file: null #/pwd/nemo_multimodal/nemo_experiments/nemo_llava_finetune/ve
 
 def predict_impl(input_prompts):
 
-    cfg.inference.tokens_to_generate = 1024
+    cfg.inference.tokens_to_generate = 512
 
     length_params: LengthParam = {
         "max_length": cfg.inference.tokens_to_generate,
@@ -118,8 +120,13 @@ def predict(prompt, image=None):
     input_data = {"prompt": prompt}
     if image is not None:
         input_data["image"] = image_processor(image)
-        print("Got image size", image.size, "processed into:", input_data["image"])
+        input_data["label"] = "helpfulness:5,correctness:5,coherence:5,hallucination:no"
+        logging.info(f"Got image size {image.size} processed into: {input_data['image']}")
+    else:
+        input_data["label"] = "helpfulness:5,correctness:5,coherence:5"
 
+    
+    logging.info("Calling predict_impl...")
     # Call "main" predict (rank = 0)
     responses = predict_impl([input_data])
     return responses[0]["clean_response"].replace("<extra_id_1>", "").strip()
@@ -163,7 +170,7 @@ def get_vlm_response_neva(history, image, max_tokens = 512):
         # PIL image to jpeg
         image = PIL.Image.fromarray(image)
         image = image.convert("RGB")
-        print("Passing image size", image.size)
+        logging.info("Passing image size {image.size}")
 
         prompt = "<image>\n"
     else:
@@ -190,13 +197,35 @@ def bot(history, image):
         yield history
 
 
-# Minimalistic OpenAI Compatible API implementation
+class TextContent(BaseModel):
+    type: str
+    text: str
+
+    @field_validator('type')
+    def check_type(cls, v):
+        if v != 'text':
+            raise ValueError('type must be text')
+        return v
+
+class ImageUrl(BaseModel):
+    url: str
+
+class ImageContent(BaseModel):
+    type: str
+    image_url: ImageUrl
+
+    @field_validator('type')
+    def check_type(cls, v):
+        if v != 'image_url':
+            raise ValueError('type must be image_url')
+        return v
+
 class Message(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Union[TextContent, ImageContent]]]
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = "neva-gpt-model"
+    model: Optional[str] = "mock-gpt-model"
     messages: List[Message]
     max_tokens: Optional[int] = 1024
     temperature: Optional[float] = 0.2
@@ -222,14 +251,45 @@ async def process_queue():
                     if message.role.lower() == "system": continue
 
                     if not first: prompt += f"<extra_id_1>{message.role.capitalize()}\n"
-                    prompt += message.content.strip() + "\n"
+
+                    if isinstance(message.content, str):
+                        prompt += message.content.strip() + "\n"
+                    else:
+                        for content in message.content:
+                            if content.type == "text":
+                                prompt += content.text.strip() + "\n"
+                            elif content.type == "image_url":
+                                prompt += "<image>\n"
+                            else:
+                                raise ValueError(f"Unsupported content type: {content.type}")
+                    
                     first = False
 
                 return prompt.strip()
 
+            def get_image(messages):
+                image = None
+                for message in messages:
+                    if not isinstance(message.content, str):
+                        for content in message.content:
+                            if content.type == "image_url":
+                                if image is not None:
+                                    raise ValueError("Multiple images in the message")
+
+                                url = content.image_url.url
+                                logging.info(f"Got image url {url} downloading...")
+                                image = PIL.Image.open(requests.get(url, stream=True).raw)
+                                logging.info(f"Got image size {image.size}")
+
+                if image is not None:
+                    return image_processor(image)
+                
+                return None
+
             input_prompts = [{
                                 "prompt": get_prompt(entry["request"].messages),
-                                "image" : None                            
+                                "label" : "helpfulness:5,correctness:5,coherence:5",
+                                "image" : get_image(entry["request"].messages)
                             } for entry in batch]
             responses = predict_impl(input_prompts)
             
@@ -251,8 +311,9 @@ async def process_queue():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="distckpt.nemo")
+    parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--model-base", type=str, default=None)
+    #parser.add_argument("--model-peft", type=str, default=None)
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--api", action="store_true")
@@ -262,11 +323,41 @@ if __name__ == "__main__":
     cfg = OmegaConf.create(CFG_STRING)
     cfg.neva_model_file = args.model_path
     cfg.base_model_file = args.model_base
+    #cfg.restore_from_path = args.model_peft
     cfg.tensor_model_parallel_size = args.tp
     cfg.pipeline_model_parallel_size = args.pp
-    cfg.trainer.devices = args.tp * args.pp
+    cfg.trainer.devices = args.tp * args.pp // cfg.trainer.num_nodes
+
+    logging.info("cfg.trainer.num_nodes {cfg.trainer.num_nodes}")
+    logging.info("cfg.trainer.devices {cfg.trainer.devices}")
     model, image_processor,_ = create_neva_model_and_processor(cfg)
-    print(predict("<image>\nPlease describe this image in detail.", PIL.Image.open("640px-AgamaSinaita.jpg")))
+    logging.info("Freezing the model...")
+
+    #logging.info("Waiting to freeze the model")
+    #if torch.distributed.is_initialized():
+    #    logging.info("Waiting for the barrier")
+    #    torch.distributed.barrier()
+
+    try:
+        model.freeze()
+    except AttributeError:
+        logging.info("Failed to freeze the model.")
+        pass
+
+    # Have to turn off activations_checkpoint_method for inference
+    #try:
+    #    model.model.language_model.encoder.activations_checkpoint_method = None
+    #except AttributeError:
+    #    print("Failed to turn off activation checkpoint method.")
+    #    pass
+
+
+    #time.sleep(60)  # wait for other nodes... 
+    logging.info("Wait complete, running inference request")
+    logging.info(predict("<image>\nPlease describe this image in detail.", 
+                         PIL.Image.open("docs/source/multimodal/mllm/images/llava_arch.jpg")))
+    logging.info("Done! Exiting.")
+    sys.exit()
 
 
     with gr.Blocks(analytics_enabled = False) as demo:
@@ -300,6 +391,11 @@ if __name__ == "__main__":
             gr.Examples([
                         ["Hello, please describe this image in detail."],
                         ["Please, ignore the image and tell something about pinguins."],
+                        ["Ask a question about the image."],
+                        ["Answer the question with the number of the correct option."],
+                        ["Answer that question."],
+                        ["Detect and list any issues with the conversation here:\n\n---\n\nUser: Prompt. \n\nAssistant: Response.\n\n---\n\nPlease report issuesin the exchange above, to report use a Markdown list:\n- issue: text excerpt\n\nIssue labels: False premise|Incorrect|Irrelevant|Hallucination|Repetition|Incoherent|Contradiction|Complex|Verbose/Wordy|Humorous.\nWhen no issues are detected, please write 'No issues.'."],
+                        ["Based on the above, estimate and output NeVA.v4 label for: helpfulness,correctness,coherence,hallucination."]
                     ],
                     txt,
                 )
