@@ -375,7 +375,7 @@ def create_neva_model_and_processor(cfg):
             neva_cfg.fp8 = False
             neva_cfg.tensor_model_parallel_size = cfg.tensor_model_parallel_size
             neva_cfg.pipeline_model_parallel_size = cfg.pipeline_model_parallel_size
-        #    neva_cfg.mm_cfg.vision_encoder.from_pretrained = None
+            neva_cfg.mm_cfg.vision_encoder.from_pretrained = "/opt/NeMo/siglip-so400m-patch14-384"
 
         model = MegatronNevaModel.restore_from(
             restore_path=cfg.neva_model_file,

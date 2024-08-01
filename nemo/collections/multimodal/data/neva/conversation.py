@@ -25,14 +25,25 @@ DEFAULT_VIDEO_TOKEN = "<video>"
 DEFAULT_SYSTEM_TOKEN = "<extra_id_0>"
 DEFAULT_SEPARATOR_TOKEN = "<extra_id_1>"
 DEFAULT_LABELS_TOKEN = "<extra_id_2>"
-DEFAULT_IMAGE_PATCH_TOKEN = defaultdict(lambda: "<extra_id_3>")
-DEFAULT_IM_START_TOKEN = defaultdict(lambda: "<extra_id_4>")
-DEFAULT_IM_END_TOKEN = defaultdict(lambda: "<extra_id_5>")
+
+#DEFAULT_IMAGE_PATCH_TOKEN = defaultdict(lambda: "<extra_id_3>")
+#DEFAULT_IM_START_TOKEN = defaultdict(lambda: "<extra_id_4>")
+#DEFAULT_IM_END_TOKEN = defaultdict(lambda: "<extra_id_5>")
+
+DEFAULT_IMAGE_PATCH_TOKEN = defaultdict(lambda: "@media")
+DEFAULT_IM_START_TOKEN = defaultdict(lambda: "_IMAGE")
+DEFAULT_IM_END_TOKEN = defaultdict(lambda: "/media")
 
 # Update llama3 default
 DEFAULT_IMAGE_PATCH_TOKEN["llama_3"] = "<|reserved_special_token_3|>"
 DEFAULT_IM_START_TOKEN["llama_3"] = "<|reserved_special_token_4|>"
 DEFAULT_IM_END_TOKEN["llama_3"] = "<|reserved_special_token_5|>"
+
+
+# Update llama3 default
+#DEFAULT_IMAGE_PATCH_TOKEN["mistral"] = "<SPECIAL_3>"
+#DEFAULT_IM_START_TOKEN["mistral"] = "<SPECIAL_4>"
+#DEFAULT_IM_END_TOKEN["mistral"] = "<SPECIAL_5>"
 
 
 class SeparatorStyle(Enum):

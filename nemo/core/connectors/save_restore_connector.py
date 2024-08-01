@@ -264,12 +264,15 @@ class SaveRestoreConnector:
             trainer,
             validate_access_integrity,
         )
+        logging.info(f'Model {instance.__class__.__name__} config was successfully loaded (1) from {restore_path}.')
+
         if not isinstance(loaded_params, tuple) or return_config is True:
             return loaded_params
         conf, instance, state_dict = loaded_params
         state_dict = self.modify_state_dict(conf, state_dict)
         self.load_instance_with_state_dict(instance, state_dict, strict)
-        logging.info(f'Model {instance.__class__.__name__} was successfully restored from {restore_path}.')
+        trainer.strategy.barrier()
+        logging.info(f'Model {instance.__class__.__name__} was successfully restored (2) from {restore_path}.')
         return instance
 
     def extract_state_dict_from(self, restore_path: str, save_dir: str, split_by_module: bool = False):

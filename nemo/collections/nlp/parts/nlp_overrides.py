@@ -1277,6 +1277,8 @@ class NLPSaveRestoreConnector(SaveRestoreConnector):
         # if we're using dist checkpointing then state_dict will be None
         if state_dict is None:
             # dist checkpointing needs torch.distributed to load the checkpoint
+            logging.info(f'Model {instance.__class__.__name__} distributed load is used, loading from {restore_path}.')
+
             if not parallel_state.is_initialized():
 
                 def dummy():
@@ -1329,8 +1331,10 @@ class NLPSaveRestoreConnector(SaveRestoreConnector):
 
         else:
             state_dict = self.modify_state_dict(conf, state_dict)
+            logging.info(f'Model {instance.__class__.__name__} calling load_instance_with_state_dict.')
             super().load_instance_with_state_dict(instance, state_dict, strict)
-        logging.info(f'Model {instance.__class__.__name__} was successfully restored from {restore_path}.')
+        trainer.strategy.barrier()
+        logging.info(f'Model {instance.__class__.__name__} was successfully restored (1) from {restore_path}.')
         return instance
 
 
